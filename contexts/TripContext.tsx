@@ -1,66 +1,103 @@
 import { useEffect, useState, useCallback } from 'react';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import createContextHook from '@nkzw/create-context-hook';
 import { Trip, Expense, TripNote, ItineraryDay } from '@/types/trip';
 import { generateId } from '@/utils/helpers';
 import { useAuth } from '@/contexts/AuthContext';
+import { supabase } from '@/supabase';
 import { scheduleTripNotifications, cancelTripNotifications, refreshAllNotifications } from '@/utils/notifications';
 
-function getTripsKey(userId: string): string {
-  return `travel_trips_${userId}`;
-}
-
 async function loadTrips(userId: string): Promise<Trip[]> {
-  try {
-    const stored = await AsyncStorage.getItem(getTripsKey(userId));
-    return stored ? JSON.parse(stored) : [];
-  } catch (e) {
-    console.log('Error loading trips:', e);
+  const { data, error } = await supabase
+    .from('trips')
+    .select('*')
+    .eq('user_id', userId)
+    .order('createdAt', { ascending: false });
+
+  if (error) {
+    console.error('Error loading trips from Supabase:', error);
     return [];
   }
-}
-
-async function saveTrips(userId: string, trips: Trip[]): Promise<Trip[]> {
-  await AsyncStorage.setItem(getTripsKey(userId), JSON.stringify(trips));
-  return trips;
+  return data as Trip[];
 }
 
 export const [TripProvider, useTrips] = createContextHook(() => {
   const { user } = useAuth();
-  const userId = user?.id ?? '__guest__';
+  const userId = user?.id;
   const [trips, setTrips] = useState<Trip[]>([]);
+  const queryClient = useQueryClient();
 
   const tripsQuery = useQuery({
     queryKey: ['trips', userId],
-    queryFn: () => loadTrips(userId),
-    enabled: !!user,
+    queryFn: () => loadTrips(userId!),
+    enabled: !!userId,
   });
 
   useEffect(() => {
     if (tripsQuery.data) {
       setTrips(tripsQuery.data);
-      // Initial notification sync
       refreshAllNotifications(tripsQuery.data);
     }
   }, [tripsQuery.data]);
 
   useEffect(() => {
-    if (!user) {
+    if (!userId) {
       setTrips([]);
     }
-  }, [user]);
+  }, [userId]);
 
-  const syncMutation = useMutation({
-    mutationFn: (updated: Trip[]) => saveTrips(userId, updated),
+  const addTripMutation = useMutation({
+    mutationFn: async (newTrip: Trip) => {
+      const { data, error } = await supabase
+        .from('trips')
+        .insert({
+          ...newTrip,
+          user_id: userId,
+        })
+        .select()
+        .single();
+      
+      if (error) throw error;
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['trips', userId] });
+    },
   });
 
-  const persist = useCallback((updated: Trip[]) => {
-    setTrips(updated);
-    syncMutation.mutate(updated);
-  }, [syncMutation, userId]);
+  const updateTripMutation = useMutation({
+    mutationFn: async ({ id, updates }: { id: string; updates: Partial<Trip> }) => {
+      const { data, error } = await supabase
+        .from('trips')
+        .update(updates)
+        .eq('id', id)
+        .select()
+        .single();
+      
+      if (error) throw error;
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['trips', userId] });
+    },
+  });
 
-  const addTrip = useCallback((trip: Omit<Trip, 'id' | 'expenses' | 'itinerary' | 'notes' | 'createdAt'> & { itinerary?: ItineraryDay[] }) => {
+  const deleteTripMutation = useMutation({
+    mutationFn: async (id: string) => {
+      const { error } = await supabase
+        .from('trips')
+        .delete()
+        .eq('id', id);
+      
+      if (error) throw error;
+      return id;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['trips', userId] });
+    },
+  });
+
+  const addTrip = useCallback(async (trip: Omit<Trip, 'id' | 'expenses' | 'itinerary' | 'notes' | 'createdAt'> & { itinerary?: ItineraryDay[] }) => {
     const newTrip: Trip = {
       ...trip,
       id: generateId(),
@@ -69,68 +106,69 @@ export const [TripProvider, useTrips] = createContextHook(() => {
       notes: [],
       createdAt: new Date().toISOString(),
     };
-    const updated = [newTrip, ...trips];
-    persist(updated);
+    
+    await addTripMutation.mutateAsync(newTrip);
     scheduleTripNotifications(newTrip);
     return newTrip;
-  }, [trips, persist]);
+  }, [userId, addTripMutation]);
 
-  const updateTrip = useCallback((id: string, updates: Partial<Trip>) => {
-    const updated = trips.map(t => t.id === id ? { ...t, ...updates } : t);
-    persist(updated);
-    const updatedTrip = updated.find(t => t.id === id);
-    if (updatedTrip) scheduleTripNotifications(updatedTrip);
-  }, [trips, persist]);
+  const updateTrip = useCallback(async (id: string, updates: Partial<Trip>) => {
+    await updateTripMutation.mutateAsync({ id, updates });
+    const updatedTrip = trips.find(t => t.id === id);
+    if (updatedTrip) scheduleTripNotifications({ ...updatedTrip, ...updates });
+  }, [trips, updateTripMutation]);
 
-  const deleteTrip = useCallback((id: string) => {
-    const updated = trips.filter(t => t.id !== id);
-    persist(updated);
+  const deleteTrip = useCallback(async (id: string) => {
+    await deleteTripMutation.mutateAsync(id);
     cancelTripNotifications(id);
-  }, [trips, persist]);
+  }, [deleteTripMutation]);
 
-  const addExpense = useCallback((tripId: string, expense: Omit<Expense, 'id' | 'tripId'>) => {
+  const addExpense = useCallback(async (tripId: string, expense: Omit<Expense, 'id' | 'tripId'>) => {
+    const trip = trips.find(t => t.id === tripId);
+    if (!trip) return;
+
     const newExpense: Expense = { ...expense, id: generateId(), tripId };
-    const updated = trips.map(t =>
-      t.id === tripId ? { ...t, expenses: [...t.expenses, newExpense] } : t
-    );
-    persist(updated);
-  }, [trips, persist]);
+    const updatedExpenses = [...trip.expenses, newExpense];
+    
+    await updateTripMutation.mutateAsync({ id: tripId, updates: { expenses: updatedExpenses } });
+  }, [trips, updateTripMutation]);
 
-  const deleteExpense = useCallback((tripId: string, expenseId: string) => {
-    const updated = trips.map(t =>
-      t.id === tripId ? { ...t, expenses: t.expenses.filter((e: any) => e.id !== expenseId) } : t
-    );
-    persist(updated);
-  }, [trips, persist]);
+  const deleteExpense = useCallback(async (tripId: string, expenseId: string) => {
+    const trip = trips.find(t => t.id === tripId);
+    if (!trip) return;
 
-  const addNote = useCallback((tripId: string, content: string) => {
+    const updatedExpenses = trip.expenses.filter((e: any) => e.id !== expenseId);
+    await updateTripMutation.mutateAsync({ id: tripId, updates: { expenses: updatedExpenses } });
+  }, [trips, updateTripMutation]);
+
+  const addNote = useCallback(async (tripId: string, content: string) => {
+    const trip = trips.find(t => t.id === tripId);
+    if (!trip) return;
+
     const newNote: TripNote = {
       id: generateId(),
       tripId,
       content,
       createdAt: new Date().toISOString(),
     };
-    const updated = trips.map(t =>
-      t.id === tripId ? { ...t, notes: [...t.notes, newNote] } : t
-    );
-    persist(updated);
-  }, [trips, persist]);
+    const updatedNotes = [...trip.notes, newNote];
+    
+    await updateTripMutation.mutateAsync({ id: tripId, updates: { notes: updatedNotes } });
+  }, [trips, updateTripMutation]);
 
-  const deleteNote = useCallback((tripId: string, noteId: string) => {
-    const updated = trips.map(t =>
-      t.id === tripId ? { ...t, notes: t.notes.filter((n: any) => n.id !== noteId) } : t
-    );
-    persist(updated);
-  }, [trips, persist]);
+  const deleteNote = useCallback(async (tripId: string, noteId: string) => {
+    const trip = trips.find(t => t.id === tripId);
+    if (!trip) return;
 
-  const setItinerary = useCallback((tripId: string, itinerary: ItineraryDay[]) => {
-    const updated = trips.map(t =>
-      t.id === tripId ? { ...t, itinerary } : t
-    );
-    persist(updated);
-    const updatedTrip = updated.find(t => t.id === tripId);
-    if (updatedTrip) scheduleTripNotifications(updatedTrip);
-  }, [trips, persist]);
+    const updatedNotes = trip.notes.filter((n: any) => n.id !== noteId);
+    await updateTripMutation.mutateAsync({ id: tripId, updates: { notes: updatedNotes } });
+  }, [trips, updateTripMutation]);
+
+  const setItinerary = useCallback(async (tripId: string, itinerary: ItineraryDay[]) => {
+    await updateTripMutation.mutateAsync({ id: tripId, updates: { itinerary } });
+    const updatedTrip = trips.find(t => t.id === tripId);
+    if (updatedTrip) scheduleTripNotifications({ ...updatedTrip, itinerary });
+  }, [trips, updateTripMutation]);
 
   const getTripById = useCallback((id: string): Trip | undefined => {
     return trips.find(t => t.id === id);
@@ -150,3 +188,4 @@ export const [TripProvider, useTrips] = createContextHook(() => {
     getTripById,
   };
 });
+

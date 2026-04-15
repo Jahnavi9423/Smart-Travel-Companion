@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { useQuery, useMutation } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import createContextHook from '@nkzw/create-context-hook';
-import { generateId } from '@/utils/helpers';
+import { supabase } from '@/supabase';
+import { Session, User } from '@supabase/supabase-js';
 
 export interface AuthUser {
   id: string;
@@ -11,93 +11,77 @@ export interface AuthUser {
   createdAt: string;
 }
 
-interface StoredUser extends AuthUser {
-  password: string;
-}
-
-const CURRENT_USER_KEY = 'userSession';
-const ALL_USERS_KEY = 'registeredUsers';
-
-async function loadCurrentUser(): Promise<AuthUser | null> {
-  try {
-    const stored = await AsyncStorage.getItem(CURRENT_USER_KEY);
-    return stored ? JSON.parse(stored) : null;
-  } catch (e) {
-    console.log('Error loading current user:', e);
-    return null;
-  }
-}
-
-async function loadAllUsers(): Promise<StoredUser[]> {
-  try {
-    const stored = await AsyncStorage.getItem(ALL_USERS_KEY);
-    return stored ? JSON.parse(stored) : [];
-  } catch (e) {
-    console.log('Error loading users:', e);
-    return [];
-  }
-}
-
 export const [AuthProvider, useAuth] = createContextHook(() => {
   const [user, setUser] = useState<AuthUser | null>(null);
+  const [session, setSession] = useState<Session | null>(null);
   const [isReady, setIsReady] = useState(false);
-
-  const userQuery = useQuery({
-    queryKey: ['auth_current_user'],
-    queryFn: loadCurrentUser,
-  });
+  const queryClient = useQueryClient();
 
   useEffect(() => {
-    if (!userQuery.isLoading) {
-      setUser(userQuery.data ?? null);
+    // Check active sessions and sets the user
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      if (session?.user) {
+        setUser({
+          id: session.user.id,
+          name: session.user.user_metadata?.name || session.user.email?.split('@')[0] || 'User',
+          email: session.user.email || '',
+          createdAt: session.user.created_at,
+        });
+      }
       setIsReady(true);
-    }
-  }, [userQuery.data, userQuery.isLoading]);
+    });
+
+    // Listen for changes on auth state (sign in, sign out, etc.)
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+      if (session?.user) {
+        setUser({
+          id: session.user.id,
+          name: session.user.user_metadata?.name || session.user.email?.split('@')[0] || 'User',
+          email: session.user.email || '',
+          createdAt: session.user.created_at,
+        });
+      } else {
+        setUser(null);
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
 
   const loginMutation = useMutation({
     mutationFn: async ({ email, password }: { email: string; password: string }) => {
-      const users = await loadAllUsers();
-      const found = users.find(
-        u => u.email.toLowerCase() === email.toLowerCase() && u.password === password
-      );
-      if (!found) throw new Error('Invalid email or password');
-      const { password: _pw, ...authUser } = found;
-      await AsyncStorage.setItem(CURRENT_USER_KEY, JSON.stringify(authUser));
-      return authUser;
-    },
-    onSuccess: (authUser) => {
-      setUser(authUser);
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: email.toLowerCase(),
+        password,
+      });
+      if (error) throw error;
+      return data;
     },
   });
 
   const signupMutation = useMutation({
     mutationFn: async ({ name, email, password }: { name: string; email: string; password: string }) => {
-      const users = await loadAllUsers();
-      if (users.find(u => u.email.toLowerCase() === email.toLowerCase())) {
-        throw new Error('An account with this email already exists');
-      }
-      const newUser: StoredUser = {
-        id: generateId(),
-        name,
+      const { data, error } = await supabase.auth.signUp({
         email: email.toLowerCase(),
         password,
-        createdAt: new Date().toISOString(),
-      };
-      await AsyncStorage.setItem(ALL_USERS_KEY, JSON.stringify([...users, newUser]));
-      const { password: _pw, ...authUser } = newUser;
-      await AsyncStorage.setItem(CURRENT_USER_KEY, JSON.stringify(authUser));
-      return authUser;
-    },
-    onSuccess: (authUser) => {
-      setUser(authUser);
+        options: {
+          data: { name },
+        },
+      });
+      if (error) throw error;
+      return data;
     },
   });
 
   const logoutMutation = useMutation({
     mutationFn: async () => {
-      await AsyncStorage.removeItem(CURRENT_USER_KEY);
+      const { error } = await supabase.auth.signOut();
+      if (error) throw error;
     },
     onSuccess: () => {
+      queryClient.clear();
       setUser(null);
     },
   });
@@ -116,6 +100,7 @@ export const [AuthProvider, useAuth] = createContextHook(() => {
 
   return {
     user,
+    session,
     isAuthenticated: !!user,
     isLoading: !isReady,
     login,
@@ -128,3 +113,4 @@ export const [AuthProvider, useAuth] = createContextHook(() => {
     setUser,
   };
 });
+

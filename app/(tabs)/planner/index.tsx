@@ -122,7 +122,6 @@ export default function PlannerScreen() {
     const budgetValue = Number(budget);
 
     if (liveTotal > budgetValue) {
-
       // cheapest transport
       const cheapestRoute = (generatedPlan.transport as any[]).length > 0
         ? (generatedPlan.transport as any[])
@@ -150,11 +149,6 @@ export default function PlannerScreen() {
           .map((r: any, i: number) => ({ price: r.estimatedCost, index: i }))
           .sort((a, b) => a.price - b.price)[0]?.index ?? 0
         : 0;
-
-      Alert.alert(
-        "Budget Exceeded",
-        "We selected the cheapest options to fit your budget."
-      );
 
       setSelectedRouteIndex(cheapestRoute);
       setSelectedHotelIndex(cheapestHotel);
@@ -553,15 +547,15 @@ export default function PlannerScreen() {
       }
 
       // Total Cost for Budget Check
-      const firstHotelCost = cityData.hotels[0].price * parsedDays;
-      // Food cost: restaurant's stored price × 3 meals × days × travelers
-      const firstFoodCost = cityData.food[0].price * 3 * parsedDays * count;
-      const firstTransCost = transportOptions.length > 0 ? transportOptions[0].estimatedCost : 0; // already round-trip × count
-      const firstSightCost = (cityData.attractions[0].price || 0) * count;
-      const totalEstimatedCost = firstHotelCost + firstFoodCost + firstTransCost + firstSightCost;
+      const minHotelCost = Math.min(...cityData.hotels.map((h: any) => h.price)) * parsedDays;
+      const minFoodCost = Math.min(...cityData.food.map((f: any) => f.price)) * 3 * parsedDays * count;
+      const minTransCost = transportOptions.length > 0 ? Math.min(...transportOptions.map((t: any) => t.estimatedCost)) : 0;
+      const minSightCost = Math.min(...cityData.attractions.map((a: any) => a.price || 0)) * count;
+      const minLocalCost = 150 * count * parsedDays;
+      const minTotalCost = minHotelCost + minFoodCost + minTransCost + minSightCost + minLocalCost;
 
-      if (parsedBudget < totalEstimatedCost) {
-        Alert.alert("Low Budget", `Your plan requires approx ₹${totalEstimatedCost} to cover estimated costs.`);
+      if (parsedBudget < minTotalCost) {
+        Alert.alert("Budget is Low", `This trip requires at least approx ₹${minTotalCost}. Your entered budget might be insufficient.`);
       }
 
       const realPlan: GeneratedPlan = {

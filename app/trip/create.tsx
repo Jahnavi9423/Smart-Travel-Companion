@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -9,17 +9,26 @@ import {
   Alert,
   KeyboardAvoidingView,
   Platform,
+  ActivityIndicator,
+  FlatList,
 } from 'react-native';
 import { Stack, useRouter } from 'expo-router';
-import { MapPin, Calendar as CalendarIcon, IndianRupee, Users, Check } from 'lucide-react-native';
+import { MapPin, Calendar as CalendarIcon, IndianRupee, Users, Check, Search, Globe } from 'lucide-react-native';
 import { Modal } from 'react-native';
 import { Calendar } from 'react-native-calendars';
 import Colors from '@/constants/colors';
 import { useTrips } from '@/contexts/TripContext';
 import { TravelerType, TripStatus } from '@/types/trip';
-import { defaultTripImages } from '@/mocks/destinations';
-import { PLACES } from "../data/places";
 import { getDestinationImage } from '@/utils/imageFetcher';
+import { CONFIG } from '@/constants/config';
+
+interface Suggestion {
+  id: string;
+  name: string;
+  country: string;
+  full_address: string;
+}
+
 const travelerOptions: { value: TravelerType; label: string; emoji: string }[] = [
   { value: 'solo', label: 'Solo', emoji: '🧳' },
   { value: 'couple', label: 'Couple', emoji: '💑' },
@@ -47,6 +56,61 @@ export default function CreateTripScreen() {
   const [travelerType, setTravelerType] = useState<TravelerType>('solo');
   const [travelerCount, setTravelerCount] = useState('1');
   const [status, setStatus] = useState<TripStatus>('planning');
+
+  // Autocomplete state
+  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const searchTimeout = useRef<NodeJS.Timeout | null>(null);
+
+  const fetchSuggestions = async (text: string) => {
+    if (text.length < 2) {
+      setSuggestions([]);
+      setShowSuggestions(false);
+      return;
+    }
+
+    setIsSearching(true);
+    setShowSuggestions(true);
+
+    try {
+      const response = await fetch(
+        `https://api.geoapify.com/v1/geocode/autocomplete?text=${encodeURIComponent(text)}&type=city&limit=5&apiKey=${CONFIG.GEOAPIFY_API_KEY}`
+      );
+      const data = await response.json();
+
+      if (data.features) {
+        const results = data.features.map((f: any) => ({
+          id: f.properties.place_id,
+          name: f.properties.city || f.properties.name || f.properties.formatted,
+          country: f.properties.country || '',
+          full_address: f.properties.formatted,
+        }));
+        setSuggestions(results);
+      }
+    } catch (error) {
+      console.error('Error fetching suggestions:', error);
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  const handleDestinationChange = (text: string) => {
+    setDestination(text);
+
+    if (searchTimeout.current) clearTimeout(searchTimeout.current);
+
+    searchTimeout.current = setTimeout(() => {
+      fetchSuggestions(text);
+    }, 500);
+  };
+
+  const selectSuggestion = (item: Suggestion) => {
+    setDestination(item.name);
+    setCountry(item.country);
+    setShowSuggestions(false);
+    setSuggestions([]);
+  };
 
   const handleCreate = async () => {
     if (!title || !destination || !country || !startDate || !endDate || !budget) {
@@ -139,8 +203,6 @@ export default function CreateTripScreen() {
     router.back();
   };
 
-
-
   return (
     <View style={styles.container}>
       <Stack.Screen
@@ -155,7 +217,11 @@ export default function CreateTripScreen() {
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         style={{ flex: 1 }}
       >
-        <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
+        <ScrollView 
+          showsVerticalScrollIndicator={false} 
+          contentContainerStyle={styles.scrollContent}
+          keyboardShouldPersistTaps="handled"
+        >
           <View style={styles.formCard}>
             <Text style={styles.label}>Trip Name *</Text>
             <View style={styles.inputContainer}>
@@ -169,22 +235,43 @@ export default function CreateTripScreen() {
             </View>
 
             <Text style={styles.label}>Destination *</Text>
-            <View style={styles.inputContainer}>
+            <View style={[styles.inputContainer, { zIndex: 100 }]}>
               <MapPin size={16} color={Colors.primary} />
               <TextInput
                 style={styles.inputWithIcon}
-                placeholder="e.g. Goa"
+                placeholder="Type city name..."
                 placeholderTextColor={Colors.textLight}
                 value={destination}
-                onChangeText={setDestination}
+                onChangeText={handleDestinationChange}
+                onFocus={() => destination.length > 1 && setShowSuggestions(true)}
               />
+              {isSearching && <ActivityIndicator size="small" color={Colors.primary} />}
             </View>
+
+            {showSuggestions && suggestions.length > 0 && (
+              <View style={styles.suggestionsContainer}>
+                {suggestions.map((item) => (
+                  <TouchableOpacity
+                    key={item.id}
+                    style={styles.suggestionItem}
+                    onPress={() => selectSuggestion(item)}
+                  >
+                    <Search size={14} color={Colors.textLight} style={{ marginRight: 10 }} />
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.suggestionName}>{item.name}</Text>
+                      <Text style={styles.suggestionFullAddress} numberOfLines={1}>{item.full_address}</Text>
+                    </View>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )}
 
             <Text style={styles.label}>Country *</Text>
             <View style={styles.inputContainer}>
+              <Globe size={16} color={Colors.primary} />
               <TextInput
-                style={styles.input}
-                placeholder="e.g. India"
+                style={styles.inputWithIcon}
+                placeholder="Automatically filled"
                 placeholderTextColor={Colors.textLight}
                 value={country}
                 onChangeText={setCountry}
@@ -359,6 +446,37 @@ const styles = StyleSheet.create({
     paddingVertical: 13,
     fontSize: 15,
     color: Colors.text,
+  },
+  suggestionsContainer: {
+    backgroundColor: Colors.white,
+    borderRadius: 12,
+    marginTop: 5,
+    padding: 5,
+    borderWidth: 1,
+    borderColor: Colors.borderLight,
+    maxHeight: 200,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  suggestionItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.background,
+  },
+  suggestionName: {
+    fontSize: 15,
+    fontWeight: '600' as const,
+    color: Colors.text,
+  },
+  suggestionFullAddress: {
+    fontSize: 12,
+    color: Colors.textSecondary,
+    marginTop: 2,
   },
   rowInputs: {
     flexDirection: 'row',

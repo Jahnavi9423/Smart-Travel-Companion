@@ -1,4 +1,5 @@
 import { defaultTripImages } from '@/mocks/destinations';
+import { CONFIG } from '@/constants/config';
 
 export function normalizeCity(city: string): string {
     const val = city.toLowerCase().trim();
@@ -8,7 +9,8 @@ export function normalizeCity(city: string): string {
     return val;
 }
 
-const UNSPLASH_ACCESS_KEY = 'pHchWcSUEce5VFFEjb-YyydeV5xf1hGjmyw1fun4EIM';
+// Using central config for the Unsplash Access Key
+const UNSPLASH_ACCESS_KEY = CONFIG.UNSPLASH_ACCESS_KEY;
 
 // Curated high-quality Unsplash images for specific local destinations to ensure relevance
 const CURATED_LOCAL_IMAGES: Record<string, string[]> = {
@@ -45,18 +47,12 @@ export async function getDestinationImage(destination: string): Promise<string> 
     const cityOnly = destination.split(',')[0].trim();
     const normalizedDestination = normalizeCity(cityOnly).toLowerCase();
     
-    // 1. Check curated list first (instant relevance, saves quota)
-    if (CURATED_LOCAL_IMAGES[normalizedDestination]) {
-        return CURATED_LOCAL_IMAGES[normalizedDestination][0];
-    }
-
-    // 2. Fetch from Unsplash Search API
+    // 1. Attempt Unsplash Search API first for 'real-time' images
     try {
         await new Promise(res => setTimeout(res, 300));
         
         let enhancedQuery = `${normalizedDestination} india tourism travel landscape`;
-        // Moving client_id to query params to bypass potential header stripping issues
-        const endpoint = `https://api.unsplash.com/search/photos?query=${encodeURIComponent(enhancedQuery)}&per_page=1&orientation=landscape&client_id=${UNSPLASH_ACCESS_KEY}`;
+        const endpoint = `https://api.unsplash.com/search/photos?query=${encodeURIComponent(enhancedQuery)}&per_page=5&orientation=landscape&client_id=${UNSPLASH_ACCESS_KEY}`;
 
         const response = await fetch(endpoint, {
             method: 'GET'
@@ -69,7 +65,12 @@ export async function getDestinationImage(destination: string): Promise<string> 
             }
         }
     } catch (error) {
-        console.error("Unsplash fetch failed:", error);
+        console.error("Unsplash real-time fetch failed:", error);
+    }
+
+    // 2. Fallback to curated list (previously prioritized)
+    if (CURATED_LOCAL_IMAGES[normalizedDestination]) {
+        return CURATED_LOCAL_IMAGES[normalizedDestination][0];
     }
     
     return fallbackImage;
@@ -84,17 +85,10 @@ export async function getDestinationImages(destination: string, count: number = 
     const cityOnly = destination.split(',')[0].trim();
     const normalizedDestination = normalizeCity(cityOnly).toLowerCase();
 
-    // 1. Curated list check
-    if (CURATED_LOCAL_IMAGES[normalizedDestination]) {
-        const curated = CURATED_LOCAL_IMAGES[normalizedDestination];
-        return curated.slice(0, count);
-    }
-
-    // 2. Unsplash API call
+    // 1. Attempt Unsplash API call first for real-time gallery
     try {
         await new Promise(res => setTimeout(res, 300));
         const query = `${normalizedDestination} india landmarks landscape nature`;
-        // Moving client_id to query params to bypass potential header stripping issues
         const endpoint = `https://api.unsplash.com/search/photos?query=${encodeURIComponent(query)}&per_page=${count}&orientation=landscape&client_id=${UNSPLASH_ACCESS_KEY}`;
         
         const response = await fetch(endpoint, { method: 'GET' });
@@ -109,7 +103,13 @@ export async function getDestinationImages(destination: string, count: number = 
         console.error("Unsplash gallery fetch failed", e);
     }
 
-    // Fallback to default trip images
+    // 2. Fallback to curated list check
+    if (CURATED_LOCAL_IMAGES[normalizedDestination]) {
+        const curated = CURATED_LOCAL_IMAGES[normalizedDestination];
+        return curated.slice(0, count);
+    }
+
+    // 3. Last fallback to default trip images
     return defaultTripImages.slice(0, count);
 }
 
