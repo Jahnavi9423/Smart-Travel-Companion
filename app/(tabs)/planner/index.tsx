@@ -608,7 +608,7 @@ export default function PlannerScreen() {
           }];
         })(),
         destinationOverview: `${destination} trip for ${parsedDays} days. Source: ${source}. Distance: ${dist} km. Full dynamic itinerary generated.`,
-        totalEstimated: totalEstimatedCost,
+        totalEstimated: minTotalCost,
         itinerary: itineraryData
       };
 
